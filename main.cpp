@@ -1,140 +1,195 @@
-// main.cpp
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 #include <cmath>
 #include <iostream>
+#include <vector>
+#include <cstdlib>
 #include "../engine-thingy/libs/libber.hpp"
-// --------------------
-// FPS Camera
-// --------------------
-
 
 // --------------------
-// Shaders (basic color)
+// Shaders
 // --------------------
 const char* vertexShaderSource = R"(
 #version 330 core
 layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aBary;
+
+out vec3 vBary;
+
 uniform mat4 uMVP;
+
 void main() {
+    vBary = aBary;
     gl_Position = uMVP * vec4(aPos, 1.0);
 })";
 
 const char* fragmentShaderSource = R"(
 #version 330 core
+in vec3 vBary;
 out vec4 FragColor;
+
+uniform vec3 uColor;
+
+float edgeFactor() {
+    vec3 d = fwidth(vBary);
+    vec3 a3 = smoothstep(vec3(0.0), d*1.5, vBary);
+    return min(min(a3.x,a3.y),a3.z);
+}
+
 void main() {
-    FragColor = vec4(0.8,0.3,0.3,1.0);
-})";
+    float factor = edgeFactor();
+    FragColor = mix(vec4(uColor,1.0), vec4(0,0,0,1.0), 1.0 - factor);
+}
+)";
 
 // --------------------
-// Cube vertices
+// Cube data (same as before)
 // --------------------
 float cubeVertices[] = {
-    -0.5f,-0.5f,-0.5f,  0.5f,-0.5f,-0.5f,  0.5f,0.5f,-0.5f,
-     0.5f,0.5f,-0.5f,  -0.5f,0.5f,-0.5f, -0.5f,-0.5f,-0.5f,
-    -0.5f,-0.5f,0.5f,   0.5f,-0.5f,0.5f,   0.5f,0.5f,0.5f,
-     0.5f,0.5f,0.5f,   -0.5f,0.5f,0.5f,  -0.5f,-0.5f,0.5f,
-    -0.5f,0.5f,0.5f,   -0.5f,0.5f,-0.5f,  -0.5f,-0.5f,-0.5f,
-    -0.5f,-0.5f,-0.5f, -0.5f,-0.5f,0.5f,  -0.5f,0.5f,0.5f,
-     0.5f,0.5f,0.5f,    0.5f,0.5f,-0.5f,   0.5f,-0.5f,-0.5f,
-     0.5f,-0.5f,-0.5f,  0.5f,-0.5f,0.5f,    0.5f,0.5f,0.5f,
-    -0.5f,-0.5f,-0.5f,  0.5f,-0.5f,-0.5f,  0.5f,-0.5f,0.5f,
-     0.5f,-0.5f,0.5f,  -0.5f,-0.5f,0.5f,  -0.5f,-0.5f,-0.5f,
-    -0.5f,0.5f,-0.5f,   0.5f,0.5f,-0.5f,   0.5f,0.5f,0.5f,
-     0.5f,0.5f,0.5f,  -0.5f,0.5f,0.5f,  -0.5f,0.5f,-0.5f
+    // positions          // barycentric
+    // Front
+    -0.5f,-0.5f,0.5f, 1,0,0,  0.5f,-0.5f,0.5f, 0,1,0,  0.5f,0.5f,0.5f, 0,0,1,
+     0.5f,0.5f,0.5f, 1,0,0, -0.5f,0.5f,0.5f, 0,1,0, -0.5f,-0.5f,0.5f, 0,0,1,
+    // Back
+    -0.5f,-0.5f,-0.5f, 1,0,0,  0.5f,0.5f,-0.5f, 0,1,0,  0.5f,-0.5f,-0.5f, 0,0,1,
+     0.5f,0.5f,-0.5f, 1,0,0, -0.5f,-0.5f,-0.5f, 0,1,0, -0.5f,0.5f,-0.5f, 0,0,1,
+    // Left
+    -0.5f,-0.5f,-0.5f, 1,0,0, -0.5f,0.5f,0.5f, 0,1,0, -0.5f,0.5f,-0.5f, 0,0,1,
+    -0.5f,-0.5f,-0.5f, 1,0,0, -0.5f,-0.5f,0.5f, 0,1,0, -0.5f,0.5f,0.5f, 0,0,1,
+    // Right
+     0.5f,-0.5f,-0.5f, 1,0,0,  0.5f,0.5f,-0.5f, 0,1,0,  0.5f,0.5f,0.5f, 0,0,1,
+     0.5f,-0.5f,-0.5f, 1,0,0,  0.5f,0.5f,0.5f, 0,1,0,  0.5f,-0.5f,0.5f, 0,0,1,
+    // Top
+    -0.5f,0.5f,-0.5f, 1,0,0,  0.5f,0.5f,0.5f, 0,1,0,  0.5f,0.5f,-0.5f, 0,0,1,
+    -0.5f,0.5f,-0.5f, 1,0,0, -0.5f,0.5f,0.5f, 0,1,0,  0.5f,0.5f,0.5f, 0,0,1,
+    // Bottom
+    -0.5f,-0.5f,-0.5f, 1,0,0,  0.5f,-0.5f,-0.5f, 0,1,0,  0.5f,-0.5f,0.5f, 0,0,1,
+    -0.5f,-0.5f,-0.5f, 1,0,0,  0.5f,-0.5f,0.5f, 0,1,0, -0.5f,-0.5f,0.5f, 0,0,1
 };
 
 // --------------------
-// Globals for input
+// Globals
 // --------------------
 Camera camera;
-
 Keyboard keyboard;
+Mouse mouse;
+float deltaTime=0,lastFrame=0;
+bool wireframeMode = false;
 
-float deltaTime = 0.0f, lastFrame = 0.0f;
+// --------------------
+// Cube class
+// --------------------
+struct Cube {
+    Vec3 pos;
+    Vec3 rot;   // rotation angles
+    Vec3 color;
+};
 
+// Generate random cubes
+std::vector<Cube> cubes;
+void generateCubes(int n){
+    for(int i=0;i<n;i++){
+        Cube c;
+        c.pos = Vec3((rand()%100-50),(rand()%100-50),(rand()%100-50));
+        c.rot = Vec3(0,0,0);
+        c.color = Vec3((rand()%100)/100.0f,(rand()%100)/100.0f,(rand()%100)/100.0f);
+        cubes.push_back(c);
+    }
+}
 
 // --------------------
 // Main
 // --------------------
-int main() {
+int main(){
     if(!glfwInit()) return -1;
-    GLFWwindow* window = glfwCreateWindow(800,600,"FPS OpenGL",nullptr,nullptr);
-    if(!window) { glfwTerminate(); return -1; }
+    GLFWwindow* window = glfwCreateWindow(800,600,"Mini FPS Game",nullptr,nullptr);
+    if(!window){ glfwTerminate(); return -1; }
     glfwMakeContextCurrent(window);
-    glewExperimental = true;
-    if(glewInit()!=GLEW_OK) { std::cout<<"GLEW init failed\n"; return -1; }
+    glewExperimental=true;
+    if(glewInit()!=GLEW_OK){ std::cout<<"GLEW init failed\n"; return -1; }
 
-    glfwSetCursorPosCallback(window, camera.mouse_callback);
-    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    glfwSetCursorPosCallback(window,camera.mouse_callback);
+    glfwSetInputMode(window,GLFW_CURSOR,GLFW_CURSOR_DISABLED);
 
-    // Shader
-    GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vertexShader,1,&vertexShaderSource,nullptr);
-    glCompileShader(vertexShader);
-    GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fragmentShader,1,&fragmentShaderSource,nullptr);
-    glCompileShader(fragmentShader);
-    GLuint shaderProgram = glCreateProgram();
-    glAttachShader(shaderProgram,vertexShader);
-    glAttachShader(shaderProgram,fragmentShader);
+    // Shader compile
+    GLuint vs=glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vs,1,&vertexShaderSource,nullptr); glCompileShader(vs);
+    GLuint fs=glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fs,1,&fragmentShaderSource,nullptr); glCompileShader(fs);
+    GLuint shaderProgram=glCreateProgram();
+    glAttachShader(shaderProgram,vs); glAttachShader(shaderProgram,fs);
     glLinkProgram(shaderProgram);
-    glDeleteShader(vertexShader); glDeleteShader(fragmentShader);
+    glDeleteShader(vs); glDeleteShader(fs);
 
-    // Cube VAO
+    // VAO/VBO
     GLuint VAO,VBO;
     glGenVertexArrays(1,&VAO);
     glGenBuffers(1,&VBO);
     glBindVertexArray(VAO);
     glBindBuffer(GL_ARRAY_BUFFER,VBO);
     glBufferData(GL_ARRAY_BUFFER,sizeof(cubeVertices),cubeVertices,GL_STATIC_DRAW);
-    glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,3*sizeof(float),(void*)0);
-    glEnableVertexAttribArray(0);
+
+    glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,6*sizeof(float),(void*)0); glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,6*sizeof(float),(void*)(3*sizeof(float))); glEnableVertexAttribArray(1);
 
     glEnable(GL_DEPTH_TEST);
+    generateCubes(20);
 
-    // Main loop
-    while(!glfwWindowShouldClose(window)) {
-        float currentFrame = glfwGetTime();
-        deltaTime = currentFrame - lastFrame;
-        lastFrame = currentFrame;
-        keyboard.Update(window);    
+    while(!glfwWindowShouldClose(window)){
+        float currentFrame=glfwGetTime();
+        deltaTime=currentFrame-lastFrame;
+        lastFrame=currentFrame;
+        keyboard.Update(window);
 
-        float speed = 3.0f * deltaTime;
+        // Movement
+        float speed=5.0f*deltaTime;
         Vec3 right = camera.front().cross(Vec3(0,1,0)).normalize();
-        if(glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) camera.pos = camera.pos + camera.front() * speed;
-        if(glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) camera.pos = camera.pos - camera.front() * speed;
-        if(glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) camera.pos = camera.pos - right * speed;
-        if(glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) camera.pos = camera.pos + right * speed;
-        if(glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) goto cleanup;
+        if(glfwGetKey(window,GLFW_KEY_W)==GLFW_PRESS) camera.pos=camera.pos+camera.front()*speed;
+        if(glfwGetKey(window,GLFW_KEY_S)==GLFW_PRESS) camera.pos=camera.pos-camera.front()*speed;
+        if(glfwGetKey(window,GLFW_KEY_A)==GLFW_PRESS) camera.pos=camera.pos-right*speed;
+        if(glfwGetKey(window,GLFW_KEY_D)==GLFW_PRESS) camera.pos=camera.pos+right*speed;
+        if(glfwGetKey(window,GLFW_KEY_ESCAPE)==GLFW_PRESS) break;
+        if(!keyboard.prev_keys['F'] && keyboard.curr_keys['F']) wireframeMode = !wireframeMode;
+        
+
+        if(!keyboard.prev_keys['L'] && keyboard.curr_keys['L']){
+            Cube c;
+            c.pos = camera.pos;
+            c.rot = Vec3(0,0,0);
+            c.color = Vec3((rand()%100)/100.0f,(rand()%100)/100.0f,(rand()%100)/100.0f);
+            cubes.push_back(c);
+        }
 
         glClearColor(0.1f,0.1f,0.1f,1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
 
-        GLuint loc = glGetUniformLocation(shaderProgram,"uMVP");
         glUseProgram(shaderProgram);
-        Mat4 model = Mat4::identity();
-        Mat4 view = camera.getViewMatrix();
-        Mat4 proj = Mat4::perspective(45.0f*M_PI/180.0f, 800.0f/600.0f, 0.1f, 100.0f);
+        GLuint loc = glGetUniformLocation(shaderProgram,"uMVP");
+        GLuint colorLoc = glGetUniformLocation(shaderProgram,"uColor");
 
-        Mat4 mvp = multiply(proj, multiply(view, model));
-        glUniformMatrix4fv(loc, 1, GL_FALSE, mvp.m);
-                // Simple MVP multiplication (column-major)
-        Mat4 mvpFull = {};
-        for(int i=0;i<4;i++)
-            for(int j=0;j<4;j++)
-                mvpFull.m[i + j*4] = proj.m[i]*view.m[j] + mvp.m[i]*1.0f; // simplified
-        glUniformMatrix4fv(loc,1,GL_FALSE,mvp.m);
+        for(auto& c: cubes){
+            // Simple rotation
+            
+            Mat4 model = Mat4::identity();
+            model = multiply(model, model.translate(c.pos));
+            model = multiply(model, model.rotateY(c.rot.y));
+            Mat4 view = camera.getViewMatrix();
+            Mat4 proj = Mat4::perspective(45.0f*M_PI/180.0f,800.0f/600.0f,0.1f,100.0f);
+            Mat4 mvp = multiply(proj, multiply(view, model));
+            glUniformMatrix4fv(loc,1,GL_FALSE,mvp.m);
+            glUniform3f(colorLoc,c.color.x,c.color.y,c.color.z);
 
-        glBindVertexArray(VAO);
-        glDrawArrays(GL_TRIANGLES,0,36);
+            glBindVertexArray(VAO);
+            if(wireframeMode) glPolygonMode(GL_FRONT_AND_BACK,GL_LINE);
+            else glPolygonMode(GL_FRONT_AND_BACK,GL_FILL);
+            glDrawArrays(GL_TRIANGLES,0,36*6);
+        }
+
+        
 
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
-
-    cleanup:
 
     glDeleteVertexArrays(1,&VAO);
     glDeleteBuffers(1,&VBO);
