@@ -97,10 +97,15 @@ void generateCubes(int n){
     }
 }
 
+
+
 // --------------------
 // Main
 // --------------------
 int main(){
+    Cube placementGuide;
+    placementGuide.color = Vec3(1,1,1); // White outline
+    
     if(!glfwInit()) return -1;
     GLFWwindow* window = glfwCreateWindow(800,600,"Mini FPS Game",nullptr,nullptr);
     if(!window){ glfwTerminate(); return -1; }
@@ -133,16 +138,26 @@ int main(){
     glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,6*sizeof(float),(void*)(3*sizeof(float))); glEnableVertexAttribArray(1);
 
     glEnable(GL_DEPTH_TEST);
-    generateCubes(20);
 
     while(!glfwWindowShouldClose(window)){
+        Vec3 forward = camera.front();
+        placementGuide.pos = camera.pos + forward * 7.5f; // 3 units ahead
+        placementGuide.pos.x = std::round(placementGuide.pos.x);
+        placementGuide.pos.y = std::round(placementGuide.pos.y);
+        placementGuide.pos.z = std::round(placementGuide.pos.z);
+
         float currentFrame=glfwGetTime();
         deltaTime=currentFrame-lastFrame;
         lastFrame=currentFrame;
         keyboard.Update(window);
+        mouse.Update(window);
 
         // Movement
         float speed=5.0f*deltaTime;
+
+        if(keyboard.curr_keys[GLFW_KEY_LEFT_SHIFT]){speed *= 2;}
+
+
         Vec3 right = camera.front().cross(Vec3(0,1,0)).normalize();
         if(glfwGetKey(window,GLFW_KEY_W)==GLFW_PRESS) camera.pos=camera.pos+camera.front()*speed;
         if(glfwGetKey(window,GLFW_KEY_S)==GLFW_PRESS) camera.pos=camera.pos-camera.front()*speed;
@@ -151,14 +166,35 @@ int main(){
         if(glfwGetKey(window,GLFW_KEY_ESCAPE)==GLFW_PRESS) break;
         if(!keyboard.prev_keys['F'] && keyboard.curr_keys['F']) wireframeMode = !wireframeMode;
         
+        
 
-        if(!keyboard.prev_keys['L'] && keyboard.curr_keys['L']){
+        if(false){
+            for(Cube &billy: cubes){
+                billy.pos.x += 1 * deltaTime;
+                billy.pos.z = sin(billy.pos.x);
+                billy.pos.y = cos(billy.pos.x);
+            }
+        }
+        if(!mouse.prev_buttons[GLFW_MOUSE_BUTTON_RIGHT] && mouse.curr_buttons[GLFW_MOUSE_BUTTON_RIGHT]){
+             for(auto it = cubes.begin(); it != cubes.end(); ++it){
+                if(it->pos.x == placementGuide.pos.x &&
+                   it->pos.y == placementGuide.pos.y &&
+                   it->pos.z == placementGuide.pos.z){
+                    cubes.erase(it); // Remove it 
+                    break;
+                }
+            }           
+        }
+
+        if(!mouse.prev_buttons[GLFW_MOUSE_BUTTON_LEFT] && mouse.curr_buttons[GLFW_MOUSE_BUTTON_LEFT]){
             Cube c;
-            c.pos = camera.pos;
+            c.pos = placementGuide.pos;
             c.rot = Vec3(0,0,0);
             c.color = Vec3((rand()%100)/100.0f,(rand()%100)/100.0f,(rand()%100)/100.0f);
             cubes.push_back(c);
         }
+
+
 
         glClearColor(0.1f,0.1f,0.1f,1.0f);
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
@@ -185,7 +221,17 @@ int main(){
             glDrawArrays(GL_TRIANGLES,0,36*6);
         }
 
-        
+        glUniform3f(colorLoc, placementGuide.color.x, placementGuide.color.y, placementGuide.color.z);
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE); // Always wireframe
+        Mat4 model = Mat4::identity();
+        model = multiply(model, model.translate(placementGuide.pos));
+        Mat4 view = camera.getViewMatrix();
+        Mat4 proj = Mat4::perspective(45.0f*M_PI/180.0f,800.0f/600.0f,0.1f,100.0f);
+        Mat4 mvp = multiply(proj, multiply(view, model));
+        glUniformMatrix4fv(loc,1,GL_FALSE,mvp.m);
+        glBindVertexArray(VAO);
+        glDrawArrays(GL_TRIANGLES,0,36*6);
+
 
         glfwSwapBuffers(window);
         glfwPollEvents();
@@ -197,4 +243,3 @@ int main(){
     glfwTerminate();
     return 0;
 }
-
