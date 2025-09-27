@@ -7,6 +7,15 @@
 #include <cstdlib>
 #include "../engine-thingy/libs/libber.hpp"
 
+#include <unordered_map>
+#include <filesystem>
+#include <fstream>
+
+namespace fs = std::filesystem;
+
+const int CHUNK_SIZE = 16;
+const int RENDER_DISTANCE = 3; // number of chunks in each direction to load
+
 // --------------------
 // Shaders
 // --------------------
@@ -29,9 +38,8 @@ const char* fragmentShaderSource = R"(
 in vec3 vBary;
 out vec4 FragColor;
 
-uniform vec3 uColor;       // fill color for normal cubes
-uniform bool uPlacement;   // true = placement guide, false = normal cubes
-uniform float uTime;       // time for rainbow effect
+uniform vec3 uColor;
+uniform bool uHighlight;  // true = highlighted cube, false = normal cubes
 
 float edgeFactor() {
     vec3 d = fwidth(vBary);
@@ -39,48 +47,21 @@ float edgeFactor() {
     return min(min(a3.x,a3.y),a3.z);
 }
 
-vec3 rainbow(float t) {
-    return vec3(
-        0.5 + 0.5 * sin(t * 2.0),
-        0.5 + 0.5 * sin(t * 2.0 + 2.0),
-        0.5 + 0.5 * sin(t * 2.0 + 4.0)
-    );
-}
-
 void main() {
     float factor = edgeFactor();
-
-    if(uPlacement) {
-        // Rainbow outline only, transparent inside
-        vec3 outlineColor = rainbow(uTime);
-        FragColor = vec4(outlineColor, 1.0 - factor); 
+    
+    if(uHighlight) {
+        // Highlighted cube: brighter with white outline
+        vec3 outlineColor = vec3(1.0, 1.0, 1.0);
+        vec3 brightColor = uColor * 1.5; // Make it brighter
+        vec3 color = mix(outlineColor, brightColor, factor);
+        FragColor = vec4(color, 1.0);
     } else {
         // Regular cubes: black outline + fill
         vec3 outlineColor = vec3(0.0,0.0,0.0);
         vec3 color = mix(outlineColor, uColor, factor);
         FragColor = vec4(color, 1.0);
     }
-}
-
-
-)";
-
-const char* vertexOutlineShader = R"(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-uniform mat4 uMVP;
-void main() {
-    gl_Position = uMVP * vec4(aPos, 1.0);
-}
-)";
-
-const char* fragmentOutlineShader = R"(
-#version 330 core
-out vec4 FragColor;
-uniform vec3 uColor;  // color to invert
-
-void main(){
-    FragColor = vec4(vec3(1.0) - uColor, 1.0); // inverted color
 }
 )";
 
@@ -119,9 +100,8 @@ void main() {
 }
 )";
 
-
 // --------------------
-// Cube data (same as before)
+// Cube data
 // --------------------
 float cubeVertices[] = {
     // positions          // barycentric
@@ -165,25 +145,113 @@ float deltaTime=0,lastFrame=0;
 bool wireframeMode = false;
 
 // --------------------
-// Cube class
+// Cube struct
 // --------------------
 struct Cube {
     Vec3 pos;
-    Vec3 rot;   // rotation angles
+    Vec3 rot;
     Vec3 color;
 };
 
-// Generate random cubes
-std::vector<Cube> cubes;
-void generateCubes(int n){
-    for(int i=0;i<n;i++){
-        Cube c;
-        c.pos = Vec3((rand()%100-50),(rand()%100-50),(rand()%100-50));
-        c.rot = Vec3(0,0,0);
-        c.color = Vec3((rand()%100)/100.0f,(rand()%100)/100.0f,(rand()%100)/100.0f);
-        cubes.push_back(c);
+// --------------------
+// Chunk struct
+// --------------------
+struct Chunk {
+    Vec3 pos; // chunk position in chunk coords
+    std::vector<Cube> cubes;
+    bool dirty = false; // mark if modified
+};
+
+std::unordered_map<int64_t, Chunk> loadedChunks;
+
+std::string chunkFilename(int cx, int cz) {
+    return "chunks/chunk_" + std::to_string(cx) + "_" + std::to_string(cz) + ".bin";
+}
+
+int64_t chunkKey(int cx, int cz) {
+    return (int64_t)cx << 32 | (uint32_t)cz;
+}
+
+float getHighestBlockY(float x, float z) {
+    float highestY = -10000.0f; // some very low value
+    for(auto& [key, chunk] : loadedChunks){
+        for(auto& c : chunk.cubes){
+            if((int)c.pos.x == (int)std::floor(x) && (int)c.pos.z == (int)std::floor(z)){
+                if(c.pos.y > highestY) highestY = c.pos.y;
+            }
+        }
+    }
+    return highestY;
+}
+
+void saveChunk(const Chunk& chunk) {
+    fs::create_directories("chunks");
+    std::ofstream ofs(chunkFilename(chunk.pos.x, chunk.pos.z), std::ios::binary);
+    size_t n = chunk.cubes.size();
+    ofs.write((char*)&n, sizeof(size_t));
+    for (auto& c : chunk.cubes) {
+        ofs.write((char*)&c.pos, sizeof(Vec3));
+        ofs.write((char*)&c.color, sizeof(Vec3));
     }
 }
+
+Chunk loadChunk(int cx, int cz) {
+    Chunk chunk;
+    chunk.pos = Vec3(cx, 0, cz);
+    std::ifstream ifs(chunkFilename(cx, cz), std::ios::binary);
+    if (ifs) {
+        size_t n;
+        ifs.read((char*)&n, sizeof(size_t));
+        chunk.cubes.resize(n);
+        for (size_t i = 0; i < n; i++) {
+            ifs.read((char*)&chunk.cubes[i].pos, sizeof(Vec3));
+            ifs.read((char*)&chunk.cubes[i].color, sizeof(Vec3));
+        }
+    } else {
+        // Generate default floor
+        for (int x = 0; x < CHUNK_SIZE; x++) {
+            for (int z = 0; z < CHUNK_SIZE; z++) {
+                Cube c;
+                c.pos = Vec3(cx * CHUNK_SIZE + x, 0, cz * CHUNK_SIZE + z);
+                c.rot = Vec3(0,0,0);
+                c.color = Vec3(0.3f + (rand()%70)/100.0f, 0.3f + (rand()%70)/100.0f, 0.3f + (rand()%70)/100.0f);
+                chunk.cubes.push_back(c);
+            }
+        }
+    }
+    return chunk;
+}
+
+void updateLoadedChunks(const Vec3& cameraPos) {
+    int camChunkX = (int)std::floor(cameraPos.x / CHUNK_SIZE);
+    int camChunkZ = (int)std::floor(cameraPos.z / CHUNK_SIZE);
+
+    // Load chunks around camera
+    for (int dx = -RENDER_DISTANCE; dx <= RENDER_DISTANCE; dx++) {
+        for (int dz = -RENDER_DISTANCE; dz <= RENDER_DISTANCE; dz++) {
+            int cx = camChunkX + dx;
+            int cz = camChunkZ + dz;
+            int64_t key = chunkKey(cx, cz);
+            if (loadedChunks.find(key) == loadedChunks.end()) {
+                loadedChunks[key] = loadChunk(cx, cz);
+            }
+        }
+    }
+
+    // Optionally unload far chunks
+    std::vector<int64_t> toUnload;
+    for (auto& [key, chunk] : loadedChunks) {
+        int cx = chunk.pos.x, cz = chunk.pos.z;
+        if (abs(cx - camChunkX) > RENDER_DISTANCE || abs(cz - camChunkZ) > RENDER_DISTANCE) {
+            if (chunk.dirty) saveChunk(chunk);
+            toUnload.push_back(key);
+        }
+    }
+    for (auto key : toUnload) loadedChunks.erase(key);
+}
+
+// Generate random cubes
+
 
 // Ray = origin + dir * t
 bool rayIntersectsCube(const Vec3& rayOrigin, const Vec3& rayDir, const Vec3& cubePos, float& tNear) {
@@ -210,12 +278,14 @@ Cube* getCubeUnderCursor(Vec3 rayOrigin, Vec3 rayDir, float maxDistance, Vec3& h
     Cube* closest = nullptr;
     float closestT = maxDistance;
 
-    for(auto& c : cubes){
-        float t;
-        if(rayIntersectsCube(rayOrigin, rayDir, c.pos, t)){
-            if(t < closestT){
-                closestT = t;
-                closest = &c;
+    for(auto& [key, chunk] : loadedChunks){
+        for(auto& c : chunk.cubes){
+            float t;
+            if(rayIntersectsCube(rayOrigin, rayDir, c.pos, t)){
+                if(t < closestT){
+                    closestT = t;
+                    closest = &c;
+                }
             }
         }
     }
@@ -223,8 +293,7 @@ Cube* getCubeUnderCursor(Vec3 rayOrigin, Vec3 rayDir, float maxDistance, Vec3& h
     if(closest){
         hitPos = rayOrigin + rayDir * closestT;
 
-        // Determine which face was hit
-        Vec3 local = hitPos - closest->pos; // Cube-centered coordinates (-0.5..0.5)
+        Vec3 local = hitPos - closest->pos;
         float absX = std::abs(local.x), absY = std::abs(local.y), absZ = std::abs(local.z);
         if(absX > absY && absX > absZ) hitNormal = Vec3(local.x>0?1:-1,0,0);
         else if(absY > absX && absY > absZ) hitNormal = Vec3(0,local.y>0?1:-1,0);
@@ -237,14 +306,36 @@ Cube* getCubeUnderCursor(Vec3 rayOrigin, Vec3 rayDir, float maxDistance, Vec3& h
 }
 
 
+Vec3 calculatePlacementPosition(const Vec3& hitPos, const Vec3& hitNormal) {
+    Vec3 placePos = hitPos + hitNormal * 0.5f; // move to the adjacent cube center
+    // Snap to integer grid
+    placePos.x = std::floor(placePos.x + 0.5f);
+    placePos.y = std::floor(placePos.y + 0.5f);
+    placePos.z = std::floor(placePos.z + 0.5f);
+    return placePos;
+}
+
+bool isPositionOccupied(const Vec3& pos) {
+    for(auto& [key, chunk] : loadedChunks){
+        for(auto& c : chunk.cubes){
+            if(c.pos.x == pos.x && c.pos.y == pos.y && c.pos.z == pos.z)
+                return true;
+        }
+    }
+    return false;
+}
+
 // --------------------
 // Main
 // --------------------
 int main(){
-
-    Cube placementGuide;
-    
     if(!glfwInit()) return -1;
+    camera.pos = Vec3(0,0,0); // or your desired spawn X/Z
+    updateLoadedChunks(camera.pos);
+    
+    camera.pos.y = getHighestBlockY(camera.pos.x, camera.pos.z) + 1.0f;
+    camera.pos.y += 1;
+
     
     // Get the primary monitor and its video mode for fullscreen
     GLFWmonitor* monitor = glfwGetPrimaryMonitor();
@@ -286,23 +377,6 @@ int main(){
     glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,6*sizeof(float),(void*)(3*sizeof(float))); glEnableVertexAttribArray(1);
 
     glEnable(GL_DEPTH_TEST);
-      
-    // --- Compile outline shader ---
-    GLuint vsOutline = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vsOutline, 1, &vertexOutlineShader, nullptr);
-    glCompileShader(vsOutline);
-
-    GLuint fsOutline = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fsOutline, 1, &fragmentOutlineShader, nullptr);
-    glCompileShader(fsOutline);
-
-    GLuint outlineShaderProgram = glCreateProgram();
-    glAttachShader(outlineShaderProgram, vsOutline);
-    glAttachShader(outlineShaderProgram, fsOutline);
-    glLinkProgram(outlineShaderProgram);
-
-    glDeleteShader(vsOutline);
-    glDeleteShader(fsOutline);
 
     // --- Compile crosshair shader ---
     GLuint vsCrosshair = glCreateShader(GL_VERTEX_SHADER);
@@ -355,101 +429,85 @@ int main(){
     }
     
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
+    ////MAIN LOOP
     while(!glfwWindowShouldClose(window)){
-        float t = glfwGetTime()*10; // seconds since program started
-        placementGuide.color.x = 0.5f + 0.5f * sin(t * 2.0f); // red
-        placementGuide.color.y = 0.5f + 0.5f * sin(t * 2.0f + 2.0f); // green, phase shifted
-        placementGuide.color.z = 0.5f + 0.5f * sin(t * 2.0f + 4.0f); // blue, phase shifted
-
-        Vec3 forward = camera.front();
-        Vec3 hitPos, hitNormal;
-        Cube* target = getCubeUnderCursor(camera.pos, camera.front(), 7.5f, hitPos, hitNormal);
-        Vec3 placementPos;
-        if(target){
-            placementPos = target->pos; // place on the face
-        } else {
-            placementPos = camera.pos + camera.front() * 7.5f;
-        }
-        placementGuide.pos = Vec3(std::round(placementPos.x),
-                                  std::round(placementPos.y),
-                                  std::round(placementPos.z));
         float currentFrame=glfwGetTime();
         deltaTime=currentFrame-lastFrame;
         lastFrame=currentFrame;
         keyboard.Update(window);
         mouse.Update(window);
 
+        // Get target cube for highlighting and placement calculation
+        Vec3 hitPos, hitNormal;
+        Cube* targetCube = getCubeUnderCursor(camera.pos, camera.front(), 7.5f, hitPos, hitNormal);
+
         // Movement
         float speed=5.0f*deltaTime;
-        if(keyboard.curr_keys[GLFW_KEY_LEFT_SHIFT]){speed *= 2;}
+        if(keyboard.curr_keys[GLFW_KEY_LEFT_CONTROL]){speed *= 2;}
 
         Vec3 right = camera.front().cross(Vec3(0,1,0)).normalize();
 
         Vec3 forwardDir = camera.front();
-        forward.y = 0;                 // ignore vertical
-        forward = forward.normalized(); // now magnitude is 1
+        forwardDir.y = 0;                 // ignore vertical
+        forwardDir = forwardDir.normalized(); // now magnitude is 1
 
         Vec3 rightDir = right;
         rightDir.y = 0;                // ignore vertical
         rightDir = rightDir.normalized();
 
-        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) camera.pos = camera.pos + forward * speed;
-        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) camera.pos = camera.pos - forward * speed;
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) camera.pos = camera.pos + forwardDir * speed;
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) camera.pos = camera.pos - forwardDir * speed;
         if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) camera.pos = camera.pos - rightDir * speed;
         if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) camera.pos = camera.pos + rightDir * speed;
 
+        if(glfwGetKey(window,GLFW_KEY_SPACE)==GLFW_PRESS) camera.pos.y += speed; 
+        if(glfwGetKey(window,GLFW_KEY_LEFT_SHIFT)==GLFW_PRESS) camera.pos.y -= speed;
 
-
-        if(glfwGetKey(window,GLFW_KEY_SPACE)==GLFW_PRESS) camera.pos.y += speed;
         if(glfwGetKey(window,GLFW_KEY_ESCAPE)==GLFW_PRESS) break;
         if(!keyboard.prev_keys['F'] && keyboard.curr_keys['F']) wireframeMode = !wireframeMode;
         
-        if(false){
-            for(Cube &billy: cubes){
-                billy.pos.x += 1 * deltaTime;
-                billy.pos.z = sin(billy.pos.x);
-                billy.pos.y = cos(billy.pos.x);
+        updateLoadedChunks(camera.pos);
+
+        // Handle cube placement (left click)
+        if(!mouse.prev_buttons[GLFW_MOUSE_BUTTON_LEFT] && mouse.curr_buttons[GLFW_MOUSE_BUTTON_LEFT]){
+            if(targetCube){
+                Vec3 placePos = calculatePlacementPosition(hitPos, hitNormal);
+
+                // Only place if position is not occupied
+                if(!isPositionOccupied(placePos)){
+                    int cx = (int)std::floor(placePos.x / CHUNK_SIZE);
+                    int cz = (int)std::floor(placePos.z / CHUNK_SIZE);
+                    int64_t key = chunkKey(cx, cz);
+
+                    Chunk& chunk = loadedChunks[key];
+                    Cube c;
+                    c.pos = placePos;
+                    c.rot = Vec3(0,0,0);
+                    c.color = Vec3((rand()%100)/100.0f,(rand()%100)/100.0f,(rand()%100)/100.0f);
+                    chunk.cubes.push_back(c);
+                    chunk.dirty = true;
+                }
             }
         }
 
-        if(!mouse.prev_buttons[GLFW_MOUSE_BUTTON_LEFT] && mouse.curr_buttons[GLFW_MOUSE_BUTTON_LEFT]){
-            Vec3 placePos;
-            if(target){
-                placePos = target->pos + hitNormal; // Place on the face you're looking at
-                placePos.x = std::round(placePos.x);
-                placePos.y = std::round(placePos.y);
-                placePos.z = std::round(placePos.z);
-            } else {
-                placePos = camera.pos + camera.front() * 7.5f;
-                placePos.x = std::round(placePos.x);
-                placePos.y = std::round(placePos.y);
-                placePos.z = std::round(placePos.z);
-            }
 
-            // Only place if empty
-            bool canPlace = true;
-            for(auto &c: cubes){
-                if(c.pos.x == placePos.x && c.pos.y == placePos.y && c.pos.z == placePos.z){
-                    canPlace = false; break;
+        // Handle cube breaking (right click)
+        if(!mouse.prev_buttons[GLFW_MOUSE_BUTTON_RIGHT] && mouse.curr_buttons[GLFW_MOUSE_BUTTON_RIGHT]){
+            if(targetCube){
+                // Find the chunk containing the target cube
+                int cx = (int)std::floor(targetCube->pos.x / CHUNK_SIZE);
+                int cz = (int)std::floor(targetCube->pos.z / CHUNK_SIZE);
+                int64_t key = chunkKey(cx, cz);
+
+                Chunk& chunk = loadedChunks[key];
+                auto it = std::find_if(chunk.cubes.begin(), chunk.cubes.end(),
+                                       [&](const Cube& c){ return &c == targetCube; });
+                if(it != chunk.cubes.end()){
+                    chunk.cubes.erase(it);
+                    chunk.dirty = true;
                 }
             }
 
-            if(canPlace){
-                Cube c;
-                c.pos = placePos;
-                c.rot = Vec3(0,0,0);
-                c.color = Vec3((rand()%100)/100.0f,(rand()%100)/100.0f,(rand()%100)/100.0f);
-                cubes.push_back(c);
-            }
-        }
-
-        if(!mouse.prev_buttons[GLFW_MOUSE_BUTTON_RIGHT] && mouse.curr_buttons[GLFW_MOUSE_BUTTON_RIGHT]){
-            Vec3 hitPos, hitNormal;
-            if(target){
-                auto it = std::find_if(cubes.begin(), cubes.end(), [&](const Cube& c){ return &c == target; });
-                if(it != cubes.end()) cubes.erase(it);
-            }
         }
 
         // === FIRST PASS: Render to framebuffer ===
@@ -463,47 +521,7 @@ int main(){
 
         GLuint loc = glGetUniformLocation(shaderProgram,"uMVP");
         GLuint colorLoc = glGetUniformLocation(shaderProgram,"uColor");
-
-        for(auto& c: cubes){
-            Mat4 model = Mat4::identity();
-            model = multiply(model, model.translate(c.pos));
-            model = multiply(model, model.rotateY(c.rot.y));
-            Mat4 view = camera.getViewMatrix();
-            Mat4 proj = Mat4::perspective(45.0f*M_PI/180.0f,(float)screenWidth/(float)screenHeight,0.1f,100.0f);
-            Mat4 mvp = multiply(proj, multiply(view, model));
-            glUniformMatrix4fv(loc,1,GL_FALSE,mvp.m);
-            glUniform3f(colorLoc,c.color.x,c.color.y,c.color.z);
-
-            glBindVertexArray(VAO);
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-            glDrawArrays(GL_TRIANGLES,0,36*6);
-        }
-
-        glUseProgram(outlineShaderProgram);
-        GLuint locOutline = glGetUniformLocation(outlineShaderProgram, "uMVP");
-        GLuint colorOutlineLoc = glGetUniformLocation(outlineShaderProgram, "uColor");
-
-        // Model/View/Projection
-        Mat4 model = Mat4::identity();
-        model = multiply(model, model.translate(placementGuide.pos));
-        Mat4 view = camera.getViewMatrix();
-        Mat4 proj = Mat4::perspective(45.0f*M_PI/180.0f, (float)screenWidth/(float)screenHeight, 0.1f, 100.0f);
-        Mat4 mvp = multiply(proj, multiply(view, model));
-        glUniformMatrix4fv(locOutline, 1, GL_FALSE, mvp.m);
-
-        // Find underlying cube color
-        Vec3 underColor = Vec3(0.0f,0.0f,0.0f);
-        for(auto &c: cubes){
-            if(c.pos.x == placementGuide.pos.x && c.pos.y == placementGuide.pos.y && c.pos.z == placementGuide.pos.z){
-                underColor = c.color;
-                break;
-            }
-        }
-        glUniform3f(colorOutlineLoc, underColor.x, underColor.y, underColor.z);
-
-        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE); // wireframe
-        glBindVertexArray(VAO);
-        glDrawArrays(GL_TRIANGLES, 0, 36*6);
+        GLuint highlightLoc = glGetUniformLocation(shaderProgram,"uHighlight");
 
         // === SECOND PASS: Render to screen with crosshair ===
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -511,36 +529,32 @@ int main(){
         glClearColor(0.1f,0.1f,0.1f,1.0f);
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
 
-        // Render the scene again (or copy from framebuffer - but for simplicity, re-render)
+        // Render the scene again
         glUseProgram(shaderProgram);
         glEnable(GL_DEPTH_TEST);
 
-        for(auto& c: cubes){
-            Mat4 model = Mat4::identity();
-            model = multiply(model, model.translate(c.pos));
-            model = multiply(model, model.rotateY(c.rot.y));
-            Mat4 view = camera.getViewMatrix();
-            Mat4 proj = Mat4::perspective(45.0f*M_PI/180.0f,(float)screenWidth/(float)screenHeight,0.1f,100.0f);
-            Mat4 mvp = multiply(proj, multiply(view, model));
-            glUniformMatrix4fv(loc,1,GL_FALSE,mvp.m);
-            glUniform3f(colorLoc,c.color.x,c.color.y,c.color.z);
+        for (auto& [key, chunk] : loadedChunks) {
+            for (auto& c : chunk.cubes) {
+                Mat4 model = Mat4::identity();
+                model = multiply(model, model.translate(c.pos));
+                model = multiply(model, model.rotateY(c.rot.y));
+                Mat4 view = camera.getViewMatrix();
+                Mat4 proj = Mat4::perspective(45.0f*M_PI/180.0f,(float)screenWidth/(float)screenHeight,0.1f,100.0f);
+                Mat4 mvp = multiply(proj, multiply(view, model));
+                glUniformMatrix4fv(loc,1,GL_FALSE,mvp.m);
+                glUniform3f(colorLoc,c.color.x,c.color.y,c.color.z);
+                
+                // Highlight the target cube
+                bool isHighlighted = (targetCube == &c);
+                glUniform1i(highlightLoc, isHighlighted);
 
-            glBindVertexArray(VAO);
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-            glDrawArrays(GL_TRIANGLES,0,36*6);
+                glBindVertexArray(VAO);
+                glPolygonMode(GL_FRONT_AND_BACK, wireframeMode ? GL_LINE : GL_FILL);
+                glDrawArrays(GL_TRIANGLES,0,36);
+            }
         }
 
-        glUseProgram(outlineShaderProgram);
-        model = Mat4::identity();
-        model = multiply(model, model.translate(placementGuide.pos));
-        view = camera.getViewMatrix();
-        proj = Mat4::perspective(45.0f*M_PI/180.0f, (float)screenWidth/(float)screenHeight, 0.1f, 100.0f);
-        mvp = multiply(proj, multiply(view, model));
-        glUniformMatrix4fv(locOutline, 1, GL_FALSE, mvp.m);
-        glUniform3f(colorOutlineLoc, underColor.x, underColor.y, underColor.z);
-        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-        glBindVertexArray(VAO);
-        glDrawArrays(GL_TRIANGLES, 0, 36*6);
+
 
         // === Render crosshair ===
         glDisable(GL_DEPTH_TEST);
@@ -562,12 +576,15 @@ int main(){
         glfwPollEvents();
     }
 
+    for (auto& [key, chunk] : loadedChunks) {
+        if (chunk.dirty) saveChunk(chunk);
+    }
+
     glDeleteVertexArrays(1,&VAO);
     glDeleteBuffers(1,&VBO);
     glDeleteVertexArrays(1,&crosshairVAO);
     glDeleteBuffers(1,&crosshairVBO);
     glDeleteProgram(shaderProgram);
-    glDeleteProgram(outlineShaderProgram);
     glDeleteProgram(crosshairShaderProgram);
     glDeleteFramebuffers(1, &framebuffer);
     glDeleteTextures(1, &colorTexture);
