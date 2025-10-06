@@ -1,11 +1,9 @@
-#include <GL/glew.h>
-#include <GLFW/glfw3.h>
 #include <cmath>
 #include <iostream>
 #include <vector>
 #include <algorithm> // for std::find_if
 #include <cstdlib>
-#include "../engine-thingy/libs/libber.hpp"
+#include "../engine-thingy/cpp-engine.hpp"
 
 #include <unordered_map>
 #include <filesystem>
@@ -349,11 +347,14 @@ int main(){
     int screenWidth = mode->width;
     int screenHeight = mode->height;
     glfwMakeContextCurrent(window);
-    glewExperimental=true;
-    if(glewInit()!=GLEW_OK){ std::cout<<"GLEW init failed\n"; return -1; }
 
     glfwSetCursorPosCallback(window,camera.mouse_callback);
     glfwSetInputMode(window,GLFW_CURSOR,GLFW_CURSOR_DISABLED);
+
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+        std::cerr << "Failed to initialize GLAD!" << std::endl;
+        return -1;
+    }
 
     // Shader compile
     GLuint vs=glCreateShader(GL_VERTEX_SHADER);
@@ -449,11 +450,11 @@ int main(){
 
         Vec3 forwardDir = camera.front();
         forwardDir.y = 0;                 // ignore vertical
-        forwardDir = forwardDir.normalized(); // now magnitude is 1
+        forwardDir = forwardDir.normalize(); // now magnitude is 1
 
         Vec3 rightDir = right;
         rightDir.y = 0;                // ignore vertical
-        rightDir = rightDir.normalized();
+        rightDir = rightDir.normalize();
 
         if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) camera.pos = camera.pos + forwardDir * speed;
         if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) camera.pos = camera.pos - forwardDir * speed;
