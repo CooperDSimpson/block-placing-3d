@@ -151,6 +151,8 @@ struct Cube {
     Vec3 color;
 };
 
+
+
 // --------------------
 // Chunk struct
 // --------------------
@@ -436,7 +438,7 @@ int main(){
         deltaTime=currentFrame-lastFrame;
         lastFrame=currentFrame;
         keyboard.Update(window);
-        mouse.Update(window);
+        //mouse.Update(window);
 
         // Get target cube for highlighting and placement calculation
         Vec3 hitPos, hitNormal;
